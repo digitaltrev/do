@@ -1,1 +1,124 @@
-<script>window.lpTag=window.lpTag||{},'undefined'==typeof window.lpTag._tagCount?(window.lpTag={wl:lpTag.wl||null,scp:lpTag.scp||null,site:'16297565'||'',section:lpTag.section||'',tagletSection:lpTag.tagletSection||null,autoStart:lpTag.autoStart!==!1,ovr:lpTag.ovr||{},_v:'1.10.0',_tagCount:1,protocol:'https:',events:{bind:function(t,e,i){lpTag.defer(function(){lpTag.events.bind(t,e,i)},0)},trigger:function(t,e,i){lpTag.defer(function(){lpTag.events.trigger(t,e,i)},1)}},defer:function(t,e){0===e?(this._defB=this._defB||[],this._defB.push(t)):1===e?(this._defT=this._defT||[],this._defT.push(t)):(this._defL=this._defL||[],this._defL.push(t))},load:function(t,e,i){var n=this;setTimeout(function(){n._load(t,e,i)},0)},_load:function(t,e,i){var n=t;t||(n=this.protocol+'//'+(this.ovr&&this.ovr.domain?this.ovr.domain:'lptag.liveperson.net')+'/tag/tag.js?site='+this.site);var o=document.createElement('script');o.setAttribute('charset',e?e:'UTF-8'),i&&o.setAttribute('id',i),o.setAttribute('src',n),document.getElementsByTagName('head').item(0).appendChild(o)},init:function(){this._timing=this._timing||{},this._timing.start=(new Date).getTime();var t=this;window.attachEvent?window.attachEvent('onload',function(){t._domReady('domReady')}):(window.addEventListener('DOMContentLoaded',function(){t._domReady('contReady')},!1),window.addEventListener('load',function(){t._domReady('domReady')},!1)),'undefined'===typeof window._lptStop&&this.load()},start:function(){this.autoStart=!0},_domReady:function(t){this.isDom||(this.isDom=!0,this.events.trigger('LPT','DOM_READY',{t:t})),this._timing[t]=(new Date).getTime()},vars:lpTag.vars||[],dbs:lpTag.dbs||[],ctn:lpTag.ctn||[],sdes:lpTag.sdes||[],hooks:lpTag.hooks||[],identities:lpTag.identities||[],ev:lpTag.ev||[]},lpTag.init()):window.lpTag._tagCount+=1;</script>
+$(document).ready(() => {
+  prepareToConnect();
+});
+
+function prepareToConnect() {
+  $('#connect').text('connect').unbind('click').click(() => {
+    $('#connect').text('connecting...');
+    const account = $('16297565').prop('disabled',true).val();
+    LPUtils.getJWT(account).then(jwt => {
+      LPUtils.getDomain(account, 'asyncMessagingEnt').then(umsDomain => {
+        LPWs.connect(`wss://${umsDomain}/ws_api/account/${account}/messaging/consumer?v=3`)
+        .then(
+          openedSocket => handleOpenedSocket(openedSocket,jwt), 
+          errorOpening => {
+            $('#log').append(`error opening connection ${errorOpening}\n`);
+            prepareToConnect();
+          });
+      });
+    }, errorGettingJwt => {
+      $('#connect').text('connect');
+      $('#account').prop('disabled',false).val();      
+      $('#log').append(`error ${errorGettingJwt} getting jwt for account ${account}\n`);
+    });
+  });
+}
+
+function handleOpenedSocket(socket,jwt) {
+  $('#log').html(`connection is opened.\n`);
+  socket.registerRequests(apiRequestTypes);
+
+  const me = myId(jwt);
+  
+  socket.initConnection({},[{ "type": ".ams.headers.ConsumerAuthentication", "jwt": jwt}]);
+  socket.onNotification(withType('MessagingEvent'),
+    body => body.changes.forEach(change => {
+      switch (change.event.type) {
+        case 'ContentEvent':
+          $('#log').append(`${change.originatorId===me? 'you':'agent'}: ${change.event.message}\n`);
+      }
+    }));
+
+  // subscribe to open conversations metadata
+  socket.subscribeExConversations({
+    'convState': ['OPEN']
+  }).then(resp => {
+    var openConvs = {};
+    socket.onNotification(withSubscriptionID(resp.body.subscriptionId),
+      (notificationBody) => handleConversationNotification(socket,notificationBody,openConvs));
+
+    $('#send').prop('disabled', false).click(() => {
+      if (Object.keys(openConvs)[0]) {
+        publishTo(socket,Object.keys(openConvs)[0]);
+      } else  {
+        socket.consumerRequestConversation()
+          .then(resp => publishTo(socket,resp.body.conversationId));
+      }
+    });
+    $('#close').prop('disabled', false).click(() => {
+      if (Object.keys(openConvs)[0]) {
+        socket.updateConversationField({
+            conversationId: Object.keys(openConvs)[0],
+            conversationField: [{
+                    field: "ConversationStateField",
+                    conversationState: "CLOSE"
+                }]
+        });
+      }
+    });
+  });
+
+  $('#connect').text('disconnect').unbind('click').click(() => socket.ws.close());
+  socket.ws.onclose = (evt) => onCloseSocket(socket,evt);
+}
+
+function handleConversationNotification(socket,notificationBody,openConvs) {
+  notificationBody.changes.forEach(change => {
+    if (change.type === 'UPSERT') {
+      if (!openConvs[change.result.convId]) {
+        openConvs[change.result.convId] = change.result;
+        socket.subscribeMessagingEvents({
+          fromSeq: 0,
+          dialogId: change.result.convId
+        });
+      }
+    } else if (change.type === 'DELETE') {
+      delete openConvs[change.result.convId];
+      $('#log').append(`conversation was closed.\n`);
+    }
+  });
+}
+
+function onCloseSocket(socket,evt) {
+  socket.ws = null;
+  $('#log').append(`connection was closed with code ${evt.code}\n`);
+  prepareToConnect();
+  $('#send').prop('disabled', true).unbind('click');
+  $('#account').prop('disabled',false).val();        
+}
+
+function publishTo(socket,convID) {
+  socket.publishEvent({
+    dialogId: convID,
+    event: {
+      type: 'ContentEvent',
+      contentType: 'text/plain',
+      message: $('#textline').val()
+    }
+  })
+  .then(resp => $('#textline').val(''));
+}
+
+function withSubscriptionID(subscriptionID) {
+  return notif => notif.body.subscriptionId === subscriptionID;
+}
+
+function withType(type) {
+  return notif => notif.type.includes(type);
+}
+
+function myId(jwt) {
+  return JSON.parse(atob(jwt.split('.')[1])).sub;
+}
+
+const apiRequestTypes = ['cqm.SubscribeExConversations','ms.PublishEvent','cm.ConsumerRequestConversation','ms.SubscribeMessagingEvents','InitConnection','cm.UpdateConversationField'];
