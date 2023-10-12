@@ -1,7 +1,7 @@
 window.onload = function(){
-    print("lets go")
+    console.log("lets go")
     let button = document.querySelector('.MuiButton-sizeLarge');
-    print(button)
+    console.log(button)
     if (button) {
         button.click();
     } else {
